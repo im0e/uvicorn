@@ -44,11 +44,85 @@ class ServerState:
     Shared servers state that is available between all protocol instances.
     """
 
+    __slots__ = (
+        "total_requests",
+        "connections",
+        "tasks",
+        "default_headers",
+        "_event_pool",
+        "_event_pool_lock",
+        "_event_pool_max_size",
+        "_shutdown_event",
+        "_cached_date",
+        "_cached_date_time",
+    )
+
     def __init__(self) -> None:
         self.total_requests = 0
         self.connections: set[Protocols] = set()
         self.tasks: set[asyncio.Task[None]] = set()
         self.default_headers: list[tuple[bytes, bytes]] = []
+
+        # Event pool for performance optimization
+        self._event_pool: list[asyncio.Event] = []
+        self._event_pool_lock = asyncio.Lock()
+        self._event_pool_max_size = 1000  # Cap pool size to prevent unbounded growth
+
+        # Shutdown event for event-driven main loop (Phase 2a)
+        self._shutdown_event = asyncio.Event()
+
+        # Date header cache (Phase 2b)
+        self._cached_date: bytes | None = None
+        self._cached_date_time: int = 0
+
+    def acquire_event(self) -> asyncio.Event:
+        """
+        Get an event from the pool or create a new one.
+
+        Returns a cleared Event object ready for use. This reduces memory
+        allocations and GC pressure under high load.
+        """
+        # Try to get from pool (non-blocking check)
+        if self._event_pool:
+            try:
+                # Use try/except to handle race condition without async lock
+                event = self._event_pool.pop()
+                event.clear()
+                return event
+            except IndexError:
+                pass  # Pool was emptied by another thread, create new
+
+        return asyncio.Event()
+
+    def release_event(self, event: asyncio.Event) -> None:
+        """
+        Return an event to the pool for reuse.
+
+        The event is cleared and added back to the pool if there's space.
+        This method is non-blocking to avoid performance overhead.
+        """
+        if len(self._event_pool) < self._event_pool_max_size:
+            event.clear()
+            self._event_pool.append(event)
+
+    def get_date_header(self) -> bytes:
+        """
+        Get cached date header or generate new one if second changed.
+
+        This method is thread-safe and can be called from any protocol.
+        Returns the current date in HTTP header format (GMT).
+
+        Phase 2b optimization: Caches the formatted date string and only
+        regenerates when the second changes, reducing formatdate() calls.
+        """
+        current_time = int(time.time())
+
+        # Check if we need to update the cache
+        if current_time != self._cached_date_time or self._cached_date is None:
+            self._cached_date = formatdate(current_time, usegmt=True).encode()
+            self._cached_date_time = current_time
+
+        return self._cached_date
 
 
 class Server:
@@ -222,43 +296,147 @@ class Server:
             )
 
     async def main_loop(self) -> None:
-        counter = 0
-        should_exit = await self.on_tick(counter)
-        while not should_exit:
-            counter += 1
-            counter = counter % 864000
-            await asyncio.sleep(0.1)
-            should_exit = await self.on_tick(counter)
+        """
+        Event-driven main loop with no polling.
 
-    async def on_tick(self, counter: int) -> bool:
-        # Update the default headers, once per second.
-        if counter % 10 == 0:
-            current_time = time.time()
-            current_date = formatdate(current_time, usegmt=True).encode()
+        Phase 2a optimization: Replaced polling loop with event-driven
+        architecture. Main loop now waits on shutdown event instead of
+        waking every 100ms. Background tasks handle date updates, callbacks,
+        and request limit checking independently.
+        """
+        # Start background tasks
+        tasks = []
 
-            if self.config.date_header:
-                date_header = [(b"date", current_date)]
-            else:
-                date_header = []
+        # Date header update task (runs every second)
+        date_task = asyncio.create_task(self._update_date_header_loop())
+        tasks.append(date_task)
 
-            self.server_state.default_headers = date_header + self.config.encoded_headers
+        # Callback notify task (if configured)
+        if self.config.callback_notify is not None:
+            notify_task = asyncio.create_task(self._notify_callback_loop())
+            tasks.append(notify_task)
 
-            # Callback to `callback_notify` once every `timeout_notify` seconds.
-            if self.config.callback_notify is not None:
-                if current_time - self.last_notified > self.config.timeout_notify:  # pragma: full coverage
-                    self.last_notified = current_time
+        # Max requests monitoring task (if configured)
+        if self.config.limit_max_requests is not None:
+            max_requests_task = asyncio.create_task(self._check_max_requests())
+            tasks.append(max_requests_task)
+
+        try:
+            # Wait for shutdown signal (event-driven, no polling)
+            await self.server_state._shutdown_event.wait()
+        finally:
+            # Cancel all background tasks
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+
+            # Wait for tasks to finish cancellation with timeout
+            if tasks:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    pass  # Tasks didn't finish in time, that's okay
+
+    async def _update_date_header_loop(self) -> None:
+        """
+        Update date header exactly once per second.
+
+        Phase 2a optimization: Runs in background, triggered by time
+        rather than polling. Updates happen at second boundaries for
+        precise timing.
+        """
+        try:
+            while not self.should_exit:
+                # Get cached or fresh date (Phase 2b: cache handles invalidation)
+                current_date = self.server_state.get_date_header()
+
+                if self.config.date_header:
+                    date_header = [(b"date", current_date)]
+                else:
+                    date_header = []
+
+                self.server_state.default_headers = date_header + self.config.encoded_headers
+
+                # Calculate time until next second boundary
+                current_time = time.time()
+                next_update = int(current_time) + 1
+                wait_time = next_update - time.time()
+
+                # Wait until next second or shutdown
+                try:
+                    await asyncio.wait_for(
+                        self.server_state._shutdown_event.wait(),
+                        timeout=max(0.001, wait_time)
+                    )
+                    break  # Shutdown requested
+                except asyncio.TimeoutError:
+                    continue  # Time to update again
+        except asyncio.CancelledError:
+            pass  # Task cancelled, exit gracefully
+
+    async def _notify_callback_loop(self) -> None:
+        """
+        Call notify callback at specified intervals.
+
+        Phase 2a optimization: Runs independently of main loop and date
+        updates. Only created if callback_notify is configured.
+        """
+        try:
+            while not self.should_exit:
+                current_time = time.time()
+
+                # Check if it's time to notify
+                if current_time - self.last_notified > self.config.timeout_notify:
                     await self.config.callback_notify()
+                    self.last_notified = current_time
 
-        # Determine if we should exit.
-        if self.should_exit:
-            return True
+                # Wait for next notification time or shutdown
+                wait_time = self.config.timeout_notify - (current_time - self.last_notified)
 
-        max_requests = self.config.limit_max_requests
-        if max_requests is not None and self.server_state.total_requests >= max_requests:
-            logger.warning(f"Maximum request limit of {max_requests} exceeded. Terminating process.")
-            return True
+                try:
+                    await asyncio.wait_for(
+                        self.server_state._shutdown_event.wait(),
+                        timeout=max(0.001, wait_time)
+                    )
+                    break  # Shutdown requested
+                except asyncio.TimeoutError:
+                    continue  # Time to notify again
+        except asyncio.CancelledError:
+            pass  # Task cancelled, exit gracefully
 
-        return False
+    async def _check_max_requests(self) -> None:
+        """
+        Monitor for max requests limit (if configured).
+
+        Phase 2a optimization: Runs as a background task when
+        limit_max_requests is set. Checks frequently to detect
+        limit as soon as it's reached.
+        """
+        try:
+            while not self.should_exit:
+                if self.server_state.total_requests >= self.config.limit_max_requests:
+                    logger.warning(
+                        f"Maximum request limit of {self.config.limit_max_requests} exceeded. "
+                        "Terminating process."
+                    )
+                    self.should_exit = True
+                    self.server_state._shutdown_event.set()
+                    break
+
+                # Check every 100ms for responsiveness (matches old behavior)
+                try:
+                    await asyncio.wait_for(
+                        self.server_state._shutdown_event.wait(),
+                        timeout=0.1
+                    )
+                    break  # Shutdown requested
+                except asyncio.TimeoutError:
+                    continue  # Check again
+        except asyncio.CancelledError:
+            pass  # Task cancelled, exit gracefully
 
     async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
         logger.info("Shutting down")
@@ -336,3 +514,7 @@ class Server:
             self.force_exit = True  # pragma: full coverage
         else:
             self.should_exit = True
+
+        # Phase 2a: Trigger shutdown event to wake main_loop immediately
+        if hasattr(self, 'server_state') and hasattr(self.server_state, '_shutdown_event'):
+            self.server_state._shutdown_event.set()

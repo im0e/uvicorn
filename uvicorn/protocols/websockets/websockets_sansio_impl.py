@@ -198,7 +198,7 @@ class WebSocketsSansIOProtocol(asyncio.Protocol):
             "query_string": query_string.encode("ascii"),
             "headers": headers,
             "subprotocols": event.headers.get_all("Sec-WebSocket-Protocol"),
-            "state": self.app_state.copy(),
+            "state": self.app_state.copy() if self.app_state else {},
             "extensions": {"websocket.http.response": {}},
         }
         self.queue.put_nowait({"type": "websocket.connect"})

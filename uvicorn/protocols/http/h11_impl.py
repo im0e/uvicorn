@@ -213,7 +213,7 @@ class H11Protocol(asyncio.Protocol):
                     "raw_path": full_raw_path,
                     "query_string": query_string,
                     "headers": self.headers,
-                    "state": self.app_state.copy(),
+                    "state": self.app_state.copy() if self.app_state else {},
                 }
                 if self._should_upgrade():
                     self.handle_websocket_upgrade(event)
@@ -246,7 +246,7 @@ class H11Protocol(asyncio.Protocol):
                     access_logger=self.access_logger,
                     access_log=self.access_log,
                     default_headers=self.server_state.default_headers,
-                    message_event=asyncio.Event(),
+                    message_event=self.server_state.acquire_event(),
                     on_response=self.on_response_complete,
                 )
                 # For the asyncio loop, we need to explicitly start with an empty context
@@ -316,6 +316,10 @@ class H11Protocol(asyncio.Protocol):
     def on_response_complete(self) -> None:
         self.server_state.total_requests += 1
 
+        # Return the message event to the pool for reuse
+        if self.cycle and self.cycle.message_event:
+            self.server_state.release_event(self.cycle.message_event)
+
         if self.transport.is_closing():
             return
 
@@ -367,6 +371,26 @@ class H11Protocol(asyncio.Protocol):
 
 
 class RequestResponseCycle:
+    __slots__ = (
+        "scope",
+        "conn",
+        "transport",
+        "flow",
+        "logger",
+        "access_logger",
+        "access_log",
+        "default_headers",
+        "message_event",
+        "on_response",
+        "disconnected",
+        "keep_alive",
+        "waiting_for_100_continue",
+        "body",
+        "more_body",
+        "response_started",
+        "response_complete",
+    )
+
     def __init__(
         self,
         scope: HTTPScope,

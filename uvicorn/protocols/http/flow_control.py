@@ -8,6 +8,8 @@ HIGH_WATER_LIMIT = 65536
 
 
 class FlowControl:
+    __slots__ = ("_transport", "read_paused", "write_paused", "_is_writable_event")
+
     def __init__(self, transport: asyncio.Transport) -> None:
         self._transport = transport
         self.read_paused = False

@@ -194,7 +194,7 @@ class WebSocketProtocol(WebSocketServerProtocol):
             "query_string": query_string.encode("ascii"),
             "headers": asgi_headers,
             "subprotocols": subprotocols,
-            "state": self.app_state.copy(),
+            "state": self.app_state.copy() if self.app_state else {},
             "extensions": {"websocket.http.response": {}},
         }
         task = self.loop.create_task(self.run_asgi())

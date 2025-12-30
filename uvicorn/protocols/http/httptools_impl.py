@@ -231,7 +231,7 @@ class HttpToolsProtocol(asyncio.Protocol):
             "scheme": self.scheme,  # type: ignore[typeddict-item]
             "root_path": self.root_path,
             "headers": self.headers,
-            "state": self.app_state.copy(),
+            "state": self.app_state.copy() if self.app_state else {},
         }
 
     # Parser callbacks
@@ -282,7 +282,7 @@ class HttpToolsProtocol(asyncio.Protocol):
             access_logger=self.access_logger,
             access_log=self.access_log,
             default_headers=self.server_state.default_headers,
-            message_event=asyncio.Event(),
+            message_event=self.server_state.acquire_event(),
             expect_100_continue=self.expect_100_continue,
             keep_alive=http_version != "1.0",
             on_response=self.on_response_complete,
@@ -319,6 +319,10 @@ class HttpToolsProtocol(asyncio.Protocol):
     def on_response_complete(self) -> None:
         # Callback for pipelined HTTP requests to be started.
         self.server_state.total_requests += 1
+
+        # Return the message event to the pool for reuse
+        if self.cycle and self.cycle.message_event:
+            self.server_state.release_event(self.cycle.message_event)
 
         if self.transport.is_closing():
             return
@@ -371,6 +375,27 @@ class HttpToolsProtocol(asyncio.Protocol):
 
 
 class RequestResponseCycle:
+    __slots__ = (
+        "scope",
+        "transport",
+        "flow",
+        "logger",
+        "access_logger",
+        "access_log",
+        "default_headers",
+        "message_event",
+        "on_response",
+        "disconnected",
+        "keep_alive",
+        "waiting_for_100_continue",
+        "body",
+        "more_body",
+        "response_started",
+        "response_complete",
+        "chunked_encoding",
+        "expected_content_length",
+    )
+
     def __init__(
         self,
         scope: HTTPScope,
