@@ -150,3 +150,6 @@ $ hypercorn app:App
 [trio]: https://trio.readthedocs.io
 [mangum]: https://github.com/jordaneremieff/mangum
 [granian]: https://github.com/emmett-framework/granian
+
+---
+ A little bit optimized version of uvicorn
