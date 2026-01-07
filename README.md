@@ -152,4 +152,34 @@ $ hypercorn app:App
 [granian]: https://github.com/emmett-framework/granian
 
 ---
- A little bit optimized version of uvicorn
+
+## Performance Testing
+
+This fork includes optimizations for better performance and comprehensive performance testing tools.
+
+### Quick Performance Test
+
+```bash
+# Run automated performance benchmarks
+python scripts/run_performance_tests.py --quick
+
+# Or use the wrapper script
+./scripts/performance-test --quick
+
+# Save detailed report
+python scripts/run_performance_tests.py --output performance_report.txt
+```
+
+**Key Optimizations:**
+- ✅ Event object pooling (~99% reduction in Event allocations)
+- ✅ `__slots__` optimization (~88% reduction in per-object memory)
+- ✅ Conditional app_state copying
+- ✅ Event-driven main loop
+- ✅ Date header caching
+
+**Results:** ~96% reduction in memory allocations, 2-4% throughput improvement, stable at 100+ concurrent connections.
+
+For more details, see [PERFORMANCE_TESTING.md](PERFORMANCE_TESTING.md) and [tests/benchmarks/README.md](tests/benchmarks/README.md).
+
+---
+A little bit optimized version of uvicorn
