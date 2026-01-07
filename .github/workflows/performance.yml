@@ -155,7 +155,7 @@ jobs:
             </details>
             
             ---
-            *This is an automated performance test for this uvicorn fork. See [PERFORMANCE_TESTING.md](../blob/main/PERFORMANCE_TESTING.md) for more information.*
+            *This is an automated performance test for this uvicorn fork. See [PERFORMANCE_TESTING.md](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/${context.payload.pull_request.head.ref}/PERFORMANCE_TESTING.md) for more information.*
             `;
             
             github.rest.issues.createComment({

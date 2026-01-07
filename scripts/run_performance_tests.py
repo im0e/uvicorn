@@ -408,10 +408,8 @@ def main():
 
     args = parser.parse_args()
 
-    # Check dependencies
-    try:
-        import httpx
-    except ImportError:
+    # Check httpx is available (already imported at module level)
+    if httpx is None:
         print("❌ Error: httpx is required for performance testing")
         print("   Install it with: pip install httpx")
         sys.exit(1)
