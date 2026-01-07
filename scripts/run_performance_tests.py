@@ -25,9 +25,20 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
+
+# Constants
+QUICK_TEST_CONFIGS = [(500, 1), (1000, 10), (2000, 50)]
+FULL_TEST_CONFIGS = [(1000, 1), (5000, 10), (10000, 50), (10000, 100)]
+DEFAULT_TEST_APP = "tests.benchmarks.test_app:app"
+MAX_OUTPUT_PREVIEW_CHARS = 500
 
 
 def print_header(text: str, char: str = "=") -> None:
@@ -70,7 +81,7 @@ class PerformanceTestRunner:
                 sys.executable,
                 "-m",
                 "uvicorn",
-                "tests.benchmarks.test_app:app",
+                DEFAULT_TEST_APP,
                 "--host",
                 "127.0.0.1",
                 "--port",
@@ -84,7 +95,9 @@ class PerformanceTestRunner:
         )
 
         # Wait for server to be ready
-        import httpx
+        if httpx is None:
+            print("❌ httpx is required. Install it with: pip install httpx")
+            return False
 
         for i in range(30):
             try:
@@ -124,17 +137,16 @@ class PerformanceTestRunner:
 
         try:
             # We'll run a modified version inline
-            import httpx
+            if httpx is None:
+                print("❌ httpx is required")
+                return {}
 
             async def run_quick_bench():
                 url = f"http://127.0.0.1:{self.port}/"
                 results = {}
 
                 # Test configurations
-                if self.quick:
-                    configs = [(500, 1), (1000, 10), (2000, 50)]
-                else:
-                    configs = [(1000, 1), (5000, 10), (10000, 50), (10000, 100)]
+                configs = QUICK_TEST_CONFIGS if self.quick else FULL_TEST_CONFIGS
 
                 for num_requests, concurrency in configs:
                     print(f"\n  Testing: {num_requests:,} requests @ concurrency {concurrency}")
@@ -221,7 +233,10 @@ class PerformanceTestRunner:
                     elif "event" in line.lower() and "pool" in line.lower():
                         metrics["event_pooling"] = line.strip()
 
-                print(f"    {output[:500]}...")  # Print first 500 chars
+                # Print preview of output (first N chars)
+                if output:
+                    preview_length = min(len(output), MAX_OUTPUT_PREVIEW_CHARS)
+                    print(f"    {output[:preview_length]}...")
                 return metrics
             else:
                 print(f"⚠️  Memory profiling returned error: {result.returncode}")
